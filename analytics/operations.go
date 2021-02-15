@@ -3,7 +3,6 @@ package analytics
 import (
 	"fmt"
 	"image"
-	"io/ioutil"
 	"math"
 	"os"
 	"path"
@@ -14,12 +13,22 @@ import (
 	log "github.com/unchartedsoftware/plog"
 )
 
+// Operation defines the type of the operation specifier
+type Operation string
+
+// JSONString defines a JSON object as a string
+type JSONString string
+
 const (
 	// OperationCategoryCounts is the category counts operation.
 	OperationCategoryCounts = "category_counts"
 
 	// OperationMeanNDVI is the mean NDVI operation.
 	OperationMeanNDVI = "mean_ndvi"
+
+	// Constants for data sources
+	// TODO: these should really be part of some configuration
+	// file that is supplied and updated as new datasource are included.
 
 	// sentinel constants
 	band8        = "B08"
@@ -44,6 +53,25 @@ type Transformer interface {
 	Setup(inputDir string, tile *Tile) ([]*image.Gray16, error)
 	Transform(tileData []*image.Gray16) ([]float64, error)
 	ValueNames() []string
+}
+
+// CreateTileAnalytic creates and initializes a tile analytic based on a requested operation
+// type.
+func CreateTileAnalytic(metadata JSONString, operation Operation) (Transformer, error) {
+	var tileAnalytic Transformer
+	var err error
+	if operation == OperationCategoryCounts {
+		tileAnalytic, err = NewCategoryCounts(metadata)
+		if err != nil {
+			return nil, err
+		}
+	} else if operation == OperationMeanNDVI {
+		tileAnalytic = MeanNDVI{}
+	} else {
+		log.Warnf("unrecognized operation - defaulting to %s", OperationMeanNDVI)
+		tileAnalytic = MeanNDVI{}
+	}
+	return tileAnalytic, nil
 }
 
 // MeanNDVI domputes mean NDVI for a sentinel-2 tiles
@@ -112,21 +140,13 @@ type CategoryCounts struct {
 }
 
 // NewCategoryCounts create a new CategoryCounts tile operation
-func NewCategoryCounts(inputDir string) (CategoryCounts, error) {
-	path := path.Join(inputDir, "metadata.json")
-	raw, err := ioutil.ReadFile(path)
-	if err != nil {
-		return CategoryCounts{}, errors.Wrapf(err, "failed to iniialize metadata")
-	}
-
-	jsonString := string(raw)
-
-	labels, err := getCategoryNames(discreteLandCoverCategoryNames, jsonString)
+func NewCategoryCounts(metadata JSONString) (CategoryCounts, error) {
+	labels, err := getCategoryNames(discreteLandCoverCategoryNames, metadata)
 	if err != nil {
 		return CategoryCounts{}, err
 	}
 
-	values, err := getCategoryValues(discreteLandCoverCategoryValues, jsonString)
+	values, err := getCategoryValues(discreteLandCoverCategoryValues, metadata)
 	if err != nil {
 		return CategoryCounts{}, err
 	}
@@ -169,7 +189,8 @@ func (c CategoryCounts) Transform(tileData []*image.Gray16) ([]float64, error) {
 
 // Setup implements the CategoryCounts setup, loading tile data from disk.
 func (c CategoryCounts) Setup(inputDir string, tile *Tile) ([]*image.Gray16, error) {
-
+	// CDB: the band is hard coded to  land cover - it needs to be part of a configuration
+	// supplied at runtime
 	fileName := fmt.Sprintf("%s_%s_%s.tif", tile.ID, tile.Date, discreteLandCoverBand)
 	path := path.Join(inputDir, fileName)
 	img, err := loadAsGray16(path)
@@ -190,10 +211,10 @@ func (c CategoryCounts) ValueNames() []string {
 	return valueNames
 }
 
-func getCategoryValues(categoryValuesProperty string, json string) ([]uint16, error) {
+func getCategoryValues(categoryValuesProperty string, metadata JSONString) ([]uint16, error) {
 	// fetch the category values from the metadata
 	jsonPath := fmt.Sprintf("%s.%s", "properties", categoryValuesProperty)
-	result := gjson.Get(json, jsonPath)
+	result := gjson.Get(string(metadata), jsonPath)
 	if !result.IsArray() {
 		return nil, errors.Errorf("failed to find array %s in metadata", categoryValuesProperty)
 	}
@@ -206,10 +227,10 @@ func getCategoryValues(categoryValuesProperty string, json string) ([]uint16, er
 	return categoryValues, nil
 }
 
-func getCategoryNames(categoryNamesProperty string, json string) ([]string, error) {
+func getCategoryNames(categoryNamesProperty string, metadata JSONString) ([]string, error) {
 	// fetch the category values from the metadata
 	jsonPath := fmt.Sprintf("%s.%s", "properties", categoryNamesProperty)
-	result := gjson.Get(json, jsonPath)
+	result := gjson.Get(string(metadata), jsonPath)
 	if !result.IsArray() {
 		return nil, errors.Errorf("failed to find array %s in metadata", categoryNamesProperty)
 	}

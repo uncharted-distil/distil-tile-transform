@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/uncharted-distil/tile-tx/analytics"
 	log "github.com/unchartedsoftware/plog"
 )
@@ -20,60 +22,28 @@ func main() {
 	operation := flag.String("operation", "mean_NDVI", "Operation to perform on the tiles.")
 	flag.Parse()
 
-	fmt.Print("scanning directory...\n")
-
-	// Read the directory to get the list of files
-	filePaths, err := ioutil.ReadDir(*inputDir)
+	// Scan the input dir and collect tile information by parsing each file name
+	tileMap, err := createTileMap(*inputDir)
 	if err != nil {
-		log.Error(err)
-		return
+		log.Warnf("failed to read tile information")
+		os.Exit(1)
 	}
 
-	fmt.Print("processing tiles...\n")
-
-	tileMap := map[string][]analytics.Tile{}
-	parsedTiles := map[string]bool{}
-	for _, filePath := range filePaths {
-
-		// parse the file into tile id, date
-		splitPath := strings.Split(filePath.Name(), "_")
-		if len(splitPath) < 2 {
-			log.Warnf("improperly formatted file name %s", splitPath)
-			continue
-		}
-
-		// parse the ID
-		id := splitPath[0]
-
-		// parse the date
-		dateString := splitPath[1]
-		layout := "20060102T030405"
-		date, err := time.Parse(layout, dateString)
-		if err != nil {
-			log.Warnf("cannot parse date %s", dateString)
-			continue
-		}
-
-		// track the unique id/date combinations so that we only generate one tile
-		// entry per id/date pair
-		tileKey := fmt.Sprintf("%s_%s", id, dateString)
-		if _, ok := parsedTiles[tileKey]; ok {
-			continue
-		}
-		parsedTiles[tileKey] = true
-
-		// store it in our map
-		tileInfo := analytics.Tile{
-			ID:        id,
-			Date:      dateString,
-			Timestamp: date.Unix(),
-		}
-		if _, ok := tileMap[id]; !ok {
-			tileMap[id] = []analytics.Tile{}
-		}
-		tileMap[id] = insertSorted(tileMap[id], tileInfo)
+	// Load the metadata associated with the tile dataset
+	metadata, err := loadMetadata(*inputDir)
+	if err != nil {
+		log.Error(err, "could not load dataset metadata")
+		os.Exit(1)
 	}
 
+	// Instantiate a tile analytic based on the operation specified in the command line params
+	tileAnalytic, err := analytics.CreateTileAnalytic(metadata, analytics.Operation(*operation))
+	if err != nil {
+		log.Error(err, "could initialize tile analytic")
+		os.Exit(1)
+	}
+
+	// Initialize output CSV file
 	csvFile, err := os.Create("output.csv")
 	if err != nil {
 		log.Warnf("failed to create csv file")
@@ -83,18 +53,6 @@ func main() {
 
 	csvWriter := csv.NewWriter(csvFile)
 	defer csvWriter.Flush()
-
-	var tileAnalytic analytics.Transformer
-	if *operation == analytics.OperationCategoryCounts {
-		tileAnalytic, err = analytics.NewCategoryCounts(*inputDir)
-	} else if *operation == analytics.OperationMeanNDVI {
-		tileAnalytic = analytics.MeanNDVI{}
-	}
-
-	if err != nil {
-		log.Error(err, "could initialize tile analytic")
-		os.Exit(1)
-	}
 
 	// write the header row
 	err = csvWriter.Write(append([]string{"tile_id", "date"}, tileAnalytic.ValueNames()...))
@@ -153,6 +111,79 @@ func main() {
 	if lastError != nil {
 		log.Warnf("encountered %d errors - last: %s", errorCount, lastError)
 	}
+}
+
+// Creates entries for tile data by parsing file names.  Entries are mapped
+// by a derived ID.
+func createTileMap(inputDir string) (map[string][]analytics.Tile, error) {
+
+	fmt.Print("scanning directory...\n")
+
+	// Read the directory to get the list of files
+	filePaths, err := ioutil.ReadDir(inputDir)
+	if err != nil {
+		log.Error(err)
+		return nil, err
+	}
+
+	// Process the tile paths - will skip any bad records encountered
+
+	fmt.Printf("processing %d tiles...\n", len(filePaths))
+
+	tileMap := map[string][]analytics.Tile{}
+	parsedTiles := map[string]bool{}
+	for _, filePath := range filePaths {
+
+		// parse the file into tile id, date
+		splitPath := strings.Split(filePath.Name(), "_")
+		if len(splitPath) < 2 {
+			log.Warnf("improperly formatted file name %s", splitPath)
+			continue
+		}
+
+		// parse the ID
+		id := splitPath[0]
+
+		// parse the date
+		dateString := splitPath[1]
+		layout := "20060102T030405"
+		date, err := time.Parse(layout, dateString)
+		if err != nil {
+			log.Warnf("cannot parse date %s", dateString)
+			continue
+		}
+
+		// track the unique id/date combinations so that we only generate one tile
+		// entry per id/date pair
+		tileKey := fmt.Sprintf("%s_%s", id, dateString)
+		if _, ok := parsedTiles[tileKey]; ok {
+			continue
+		}
+		parsedTiles[tileKey] = true
+
+		// store it in our map
+		tileInfo := analytics.Tile{
+			ID:        id,
+			Date:      dateString,
+			Timestamp: date.Unix(),
+		}
+		if _, ok := tileMap[id]; !ok {
+			tileMap[id] = []analytics.Tile{}
+		}
+		tileMap[id] = insertSorted(tileMap[id], tileInfo)
+	}
+	return tileMap, nil
+}
+
+// Loads the associated JSON config from the dataset folder and returns
+// it as a string for processing by analytic config
+func loadMetadata(inputDir string) (analytics.JSONString, error) {
+	path := path.Join(inputDir, "metadata.json")
+	raw, err := ioutil.ReadFile(path)
+	if err != nil {
+		return "", errors.Wrapf(err, "failed to iniialize metadata")
+	}
+	return analytics.JSONString(raw), nil
 }
 
 // Inserts a tile into list sorted by date.
