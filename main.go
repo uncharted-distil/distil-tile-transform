@@ -17,6 +17,10 @@ import (
 	log "github.com/unchartedsoftware/plog"
 )
 
+const (
+	metadataFileName = "metadata.json"
+)
+
 func main() {
 	inputDir := flag.String("input", ".", "Input directory containing geotiff files.")
 	operation := flag.String("operation", "mean_NDVI", "Operation to perform on the tiles.")
@@ -55,7 +59,7 @@ func main() {
 	defer csvWriter.Flush()
 
 	// write the header row
-	err = csvWriter.Write(append([]string{"tile_id", "date"}, tileAnalytic.ValueNames()...))
+	err = csvWriter.Write(append([]string{"tile_id", "date", "bounds"}, tileAnalytic.ValueNames()...))
 	if err != nil {
 		log.Error(err, "could not write csv header")
 		os.Exit(1)
@@ -97,10 +101,13 @@ func main() {
 			}
 
 			// Reformat the tile timestamp to YYYY-MM-DD.
-			d := time.Unix(tile.Timestamp, 0).Format("2006-01-02")
+			date := time.Unix(tile.Timestamp, 0).Format("2006-01-02")
+
+			// Extract the geobounds from the first image
+			geoBounds := images[0].Bounds
 
 			// Write the tile ID, date and value to the CSV as row data.
-			if err = csvWriter.Write(append([]string{tile.ID, d}, formattedValues...)); err != nil {
+			if err = csvWriter.Write(append([]string{tile.GeoHash, date, geoBounds.String()}, formattedValues...)); err != nil {
 				lastError = err
 				errorCount++
 				continue
@@ -133,6 +140,10 @@ func createTileMap(inputDir string) (map[string][]analytics.Tile, error) {
 	tileMap := map[string][]analytics.Tile{}
 	parsedTiles := map[string]bool{}
 	for _, filePath := range filePaths {
+		// ignore the metadata file
+		if filePath.Name() == metadataFileName {
+			continue
+		}
 
 		// parse the file into tile id, date
 		splitPath := strings.Split(filePath.Name(), "_")
@@ -163,7 +174,7 @@ func createTileMap(inputDir string) (map[string][]analytics.Tile, error) {
 
 		// store it in our map
 		tileInfo := analytics.Tile{
-			ID:        id,
+			GeoHash:   id,
 			Date:      dateString,
 			Timestamp: date.Unix(),
 		}
