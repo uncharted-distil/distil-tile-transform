@@ -24,6 +24,7 @@ const (
 func main() {
 	inputDir := flag.String("input", ".", "Input directory containing geotiff files.")
 	operation := flag.String("operation", "mean_NDVI", "Operation to perform on the tiles.")
+	workers := *flag.Int("workers", 8, "number of workers")
 	flag.Parse()
 
 	// Scan the input dir and collect tile information by parsing each file name
@@ -50,7 +51,7 @@ func main() {
 	// Initialize output CSV file
 	csvFile, err := os.Create("output.csv")
 	if err != nil {
-		log.Warnf("failed to create csv file")
+		log.Error("failed to create csv file")
 		os.Exit(1)
 	}
 	defer csvFile.Close()
@@ -65,32 +66,67 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Run analytic for each tile at each timestep and write to our csv file
-	errorCount := 0
-	var lastError error
-	processedCount := 0
-	total := 0
+	// flatten tilemap to an array
+	tileArray := []analytics.Tile{}
 	for _, tiles := range tileMap {
-		if total == 0 {
-			total = len(tileMap) * len(tiles)
-		}
-		for _, tile := range tiles {
-			processedCount++
-			if processedCount%100 == 0 {
-				log.Infof("processed %d / %d", processedCount, total)
-			}
+		tileArray = append(tileArray, tiles...)
+	}
 
+	batchSize := len(tileArray) / workers
+
+	results := make(chan [][]string)
+	tileBatches := make(chan []analytics.Tile, workers)
+
+	// Start workers.  Mileage will vary given that IO is the bottleneck, and HDD
+	// reads don't parallelize.  SSD will allow for parallel reads, and you should
+	// get some OS level cacheing in either case if the tile data has been loaded recently.
+	for i := 0; i < workers; i++ {
+		go tileWorker(i, tileBatches, results, tileAnalytic, *inputDir)
+	}
+
+	// pass a batch to each processor
+	for i := 0; i < workers; i++ {
+		start := i * batchSize
+		end := (i + 1) * batchSize
+		if i == (workers - 1) {
+			end += len(tileArray) % batchSize
+		}
+		log.Infof("processing batch %d:%d\n", start, end)
+		tileBatches <- tileArray[start:end]
+	}
+	close(tileBatches)
+
+	// collect the results from the processors
+	rows := [][]string{}
+	for i := 0; i < workers; i++ {
+		r := <-results
+		rows = append(rows, r...)
+	}
+	close(results)
+
+	for _, row := range rows {
+		if err = csvWriter.Write(row); err != nil {
+			continue
+		}
+	}
+}
+
+// Processes a tile batch.
+func tileWorker(batchNum int, tileBatches chan []analytics.Tile, results chan [][]string, tileAnalytic analytics.Transformer, inputDir string) {
+	for tiles := range tileBatches {
+		rows := make([][]string, len(tiles))
+		log.Infof("batch %d: processing %d tiles", batchNum, len(tiles))
+		for i, tile := range tiles {
+			if i%100 == 0 {
+				log.Infof("batch %d: processed %d/%d tiles", batchNum, i, len(tiles))
+			}
 			// Load the required tile images and run the tile transform on them.
-			images, err := tileAnalytic.Setup(*inputDir, &tile)
+			images, err := tileAnalytic.Setup(inputDir, &tile)
 			if err != nil {
-				lastError = err
-				errorCount++
 				continue
 			}
 			values, err := tileAnalytic.Transform(images)
 			if err != nil {
-				lastError = err
-				errorCount++
 				continue
 			}
 
@@ -106,25 +142,19 @@ func main() {
 			// Extract the geobounds from the first image
 			geoBounds := images[0].Bounds
 
-			// Write the tile ID, date and value to the CSV as row data.
-			if err = csvWriter.Write(append([]string{tile.GeoHash, date, geoBounds.String()}, formattedValues...)); err != nil {
-				lastError = err
-				errorCount++
-				continue
-			}
+			// return
+			rows[i] = append([]string{tile.GeoHash, date, geoBounds.String()}, formattedValues...)
 		}
+		results <- rows
 	}
-
-	if lastError != nil {
-		log.Warnf("encountered %d errors - last: %s", errorCount, lastError)
-	}
+	log.Infof("batch %d: tile processing complete", batchNum)
 }
 
 // Creates entries for tile data by parsing file names.  Entries are mapped
 // by a derived ID.
 func createTileMap(inputDir string) (map[string][]analytics.Tile, error) {
 
-	fmt.Print("scanning directory...\n")
+	log.Infof("scanning directory")
 
 	// Read the directory to get the list of files
 	filePaths, err := ioutil.ReadDir(inputDir)
@@ -134,8 +164,7 @@ func createTileMap(inputDir string) (map[string][]analytics.Tile, error) {
 	}
 
 	// Process the tile paths - will skip any bad records encountered
-
-	fmt.Printf("processing %d tiles...\n", len(filePaths))
+	log.Infof("processing %d tiles", len(filePaths))
 
 	tileMap := map[string][]analytics.Tile{}
 	parsedTiles := map[string]bool{}
