@@ -23,6 +23,7 @@ const (
 
 func main() {
 	inputDir := flag.String("input", ".", "Input directory containing geotiff files.")
+	outputFile := flag.String("output", ".", "Output file path.")
 	operation := flag.String("operation", "mean_NDVI", "Operation to perform on the tiles.")
 	workers := *flag.Int("workers", 8, "number of workers")
 	flag.Parse()
@@ -49,7 +50,15 @@ func main() {
 	}
 
 	// Initialize output CSV file
-	csvFile, err := os.Create("output.csv")
+	dir := path.Dir(*outputFile)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		err := os.MkdirAll(dir, os.ModePerm)
+		if err != nil {
+			log.Error(err, "failed to create output directory")
+			os.Exit(1)
+		}
+	}
+	csvFile, err := os.Create(*outputFile)
 	if err != nil {
 		log.Error("failed to create csv file")
 		os.Exit(1)

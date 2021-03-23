@@ -2,7 +2,6 @@ package analytics
 
 import (
 	"fmt"
-	"image"
 	"math"
 	"os"
 	"path"
@@ -20,20 +19,22 @@ type Operation string
 type JSONString string
 
 const (
-	// OperationCategoryCounts is the category counts operation.
+	// OperationCategoryCounts counts the instances of each category value in a tile.
 	OperationCategoryCounts = "category_counts"
 
-	// OperationMeanNDVI is the mean NDVI operation.
+	// OperationMeanNDVI computes the mean NDVI for a tile.
 	OperationMeanNDVI = "mean_ndvi"
+
+	// OperationMean computes the mean for a tile.
+	OperationMean = "mean"
 
 	// Constants for data sources
 	// TODO: these should really be part of some configuration
 	// file that is supplied and updated as new datasource are included.
 
 	// sentinel constants
-	band8        = "B08"
-	band4        = "B04"
-	sentinel2Max = 10000
+	band8 = "B08"
+	band4 = "B04"
 
 	// copernicus land coverage constants
 	discreteLandCoverBand           = "discrete_classification"
@@ -67,6 +68,11 @@ func CreateTileAnalytic(metadata JSONString, operation Operation) (Transformer, 
 		}
 	} else if operation == OperationMeanNDVI {
 		tileAnalytic = MeanNDVI{}
+	} else if operation == OperationMean {
+		tileAnalytic, err = NewMean(metadata)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		log.Warnf("unrecognized operation - defaulting to %s", OperationMeanNDVI)
 		tileAnalytic = MeanNDVI{}
@@ -74,24 +80,24 @@ func CreateTileAnalytic(metadata JSONString, operation Operation) (Transformer, 
 	return tileAnalytic, nil
 }
 
-// MeanNDVI domputes mean NDVI for a sentinel-2 tiles
+// MeanNDVI domputes mean NDVI for sentinel-2 tiles
 type MeanNDVI struct{}
 
 // Transform implements the MeanNDVI tile transformation, which computes the average NDVI for a given tile.
 func (m MeanNDVI) Transform(tileData []*GeoImage) ([]float64, error) {
 	sumNDVI := 0.0
 	numValues := 0
-	image0 := tileData[0].Image
-	image1 := tileData[1].Image
-	for i := 0; i < (image0.Bounds().Max.X * image1.Bounds().Max.Y * 2); i += 2 {
+	image0 := tileData[0].Data
+	image1 := tileData[1].Data
+	for i := range image0 {
 		// extract the 16 bit pixel values for each input band
-		grayValue0 := uint16(image0.Pix[i])<<8 | uint16(image0.Pix[i+1])
-		grayValue1 := uint16(image1.Pix[i])<<8 | uint16(image1.Pix[i+1])
+		value0 := image0[i]
+		value1 := image1[i]
 
 		// compute NDVI ratio
 		transformedValue := 0.0
-		if grayValue0 != 0 || grayValue1 != 0 {
-			transformedValue = math.Max(0, float64(int32(grayValue0)-int32(grayValue1))/float64(int32(grayValue0)+int32(grayValue1)))
+		if value0 != 0 || value1 != 0 {
+			transformedValue = math.Max(0, float64(int32(value0)-int32(value1))/float64(int32(value0)+int32(value1)))
 		}
 		sumNDVI += transformedValue
 		numValues++
@@ -128,17 +134,64 @@ func (m MeanNDVI) ValueNames() []string {
 	return []string{"mean_ndvi"}
 }
 
+// Mean computes mean for a single band tile
+type Mean struct {
+	ColumnName string
+}
+
+// NewMean creates a new mean operation.
+func NewMean(metadata JSONString) (*Mean, error) {
+	// fetch band name
+	result := gjson.Get(string(metadata), "bands.0.id")
+	if result.String() == "" {
+		return nil, errors.Errorf("failed to find band ID in metadata")
+	}
+
+	return &Mean{ColumnName: result.String()}, nil
+}
+
+// Transform implements the mean tile transformation, which computes the average value for a given tile.
+func (m Mean) Transform(tileData []*GeoImage) ([]float64, error) {
+	sum := 0.0
+	data := tileData[0].Data
+	for i := range data {
+		// extract the 16 bit pixel values for each input band
+		sum += data[i]
+	}
+
+	// compute the mean NDVI
+	mean := sum / float64(len(data))
+	return []float64{mean}, nil
+}
+
+// Setup loads the data for the MeanNDVI tile transformation.
+func (m Mean) Setup(inputDir string, tile *Tile) ([]*GeoImage, error) {
+	fileName := fmt.Sprintf("%s_%s_%s.tif", tile.GeoHash, tile.Date, m.ColumnName)
+	path := path.Join(inputDir, fileName)
+	image, err := loadGeoImage(path)
+	if err != nil {
+		log.Error(err, "mean file not loaded")
+		os.Exit(1)
+	}
+	return []*GeoImage{image}, nil
+}
+
+// ValueNames returns the name of the Mean NDVI value.
+func (m Mean) ValueNames() []string {
+	return []string{m.ColumnName}
+}
+
 // CategoryData provides a category label and its associated numeric value
 // from a raster.
 type CategoryData struct {
-	Value uint16
+	Value int
 	Label string
 }
 
 // CategoryCounts computes number of pixels for each category of each value
 type CategoryCounts struct {
 	Categories []CategoryData
-	IndexMap   map[uint16]int
+	IndexMap   map[int]int
 }
 
 // NewCategoryCounts create a new CategoryCounts tile operation
@@ -153,11 +206,11 @@ func NewCategoryCounts(metadata JSONString) (CategoryCounts, error) {
 		return CategoryCounts{}, err
 	}
 
-	indexMap := map[uint16]int{}
+	indexMap := map[int]int{}
 	categories := make([]CategoryData, len(values))
 	for idx := range values {
 		label := labels[idx]
-		value := values[idx]
+		value := int(values[idx])
 		indexMap[value] = idx
 		categories[idx] = CategoryData{Value: value, Label: label}
 	}
@@ -178,9 +231,9 @@ func (c CategoryCounts) Transform(tileData []*GeoImage) ([]float64, error) {
 	}
 
 	categoryCounts := make([]float64, len(c.Categories))
-	for i := 0; i < (tileData[0].Image.Bounds().Max.X * tileData[0].Image.Bounds().Max.Y * 2); i += 2 {
+	for _, val := range tileData[0].Data {
 		// extract the 16 bit pixel values for each input band
-		value := uint16(tileData[0].Image.Pix[i])<<8 | uint16(tileData[0].Image.Pix[i+1])
+		value := int(val)
 		index := c.IndexMap[value]
 
 		// update the count for the associated category
@@ -264,7 +317,9 @@ func (g GeoBounds) String() string {
 
 // GeoImage is a gray16 image and its associated geobounds.
 type GeoImage struct {
-	Image  *image.Gray16
+	Data   []float64
+	XSize  int
+	YSize  int
 	Bounds GeoBounds
 }
 
@@ -284,7 +339,7 @@ func loadGeoImage(filePath string) (*GeoImage, error) {
 	} else if numBands > 1 {
 		log.Warnf("found %d bands - using band 0 only", numBands)
 	}
-	inputBand0 := gdalDataset.RasterBand(1)
+	inputBand := gdalDataset.RasterBand(1)
 
 	// extract input raster size and update max x,y
 	xSize := gdalDataset.RasterXSize()
@@ -300,50 +355,67 @@ func loadGeoImage(filePath string) (*GeoImage, error) {
 	}
 
 	// extract input band data type
-	dataType := inputBand0.RasterDataType()
+	dataType := inputBand.RasterDataType()
 
-	// Read in 8 or 16 bit uint data, produce a 16-bit grayscale image
-	bandImage := image.NewGray16(image.Rect(0, 0, xSize, ySize))
+	// Read data in from tiff and save it out as a float64 array.  This is less efficient than storing
+	// each type nativel, but simplifies things downstream.
+	bandData := make([]float64, xSize*ySize)
 	if dataType == gdal.UInt16 {
 		// read the band data into the image buffer
 		buffer := make([]uint16, xSize*ySize)
-		if err = inputBand0.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
+		if err = inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
 			gdalDataset.Close()
 			return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
 		}
 		gdalDataset.Close() // done with GDAL buffer
 
-		// crappy for now - go image lib stores its gray16 as [uint8, uint8] so we need an extra copy here
-		badCount := 0
-		for i, grayVal := range buffer {
-			if grayVal > sentinel2Max {
-				grayVal = sentinel2Max
-				badCount++
-			}
-			// decompose the 16-bit value into 8 bit values with a big endian ordering as per the image lib
-			// documentation
-			bandImage.Pix[i*2] = uint8(grayVal & 0xFF00 >> 8)
-			bandImage.Pix[i*2+1] = uint8(grayVal & 0xFF)
-		}
-		if badCount > 0 {
-			log.Warnf("truncated %d values from %s", badCount, filePath)
+		// copy the data into the final float64 buffer
+		for i, val := range buffer {
+			bandData[i] = float64(val)
 		}
 	} else if dataType == gdal.Byte {
 		// read the band data into the image buffer
 		buffer := make([]uint8, xSize*ySize)
-		if err = inputBand0.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
+		if err = inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
 			gdalDataset.Close()
 			return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
 		}
 		gdalDataset.Close() // done with GDAL buffer
 
-		// copy from gdal
-		for i, grayVal := range buffer {
-			// write the single 8 bit value into the 2nd byte of image data to respect big endian ordering
-			bandImage.Pix[i*2] = 0
-			bandImage.Pix[i*2+1] = grayVal
+		// copy the data into the final float64 buffer
+		for i, val := range buffer {
+			bandData[i] = float64(val)
 		}
+	} else if dataType == gdal.Float32 {
+		// read the band data into the image buffer
+		buffer := make([]float32, xSize*ySize)
+		if err = inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
+			gdalDataset.Close()
+			return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
+		}
+		gdalDataset.Close() // done with GDAL buffer
+
+		// copy the data into the final float64 buffer
+		for i, val := range buffer {
+			bandData[i] = float64(val)
+		}
+	} else if dataType == gdal.Float64 {
+		// read the band data into the image buffer
+		buffer := bandData
+		if err = inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
+			gdalDataset.Close()
+			return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
+		}
+		gdalDataset.Close() // done with GDAL buffer
+
+		// No copy needed - already stored as float64
+	} else {
+		return nil, errors.Wrapf(err, "unhandled GDAL band type %v for %s", dataType, filePath)
 	}
 
-	return &GeoImage{Image: bandImage, Bounds: bounds}, nil
+	return &GeoImage{
+		Data:   bandData,
+		XSize:  xSize,
+		YSize:  ySize,
+		Bounds: bounds}, nil
 }
