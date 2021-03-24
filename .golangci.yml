@@ -12,6 +12,8 @@ linters:
     - typecheck
     - unused
     - varcheck
+    - cyclop
+    - lll
 issues:
   # golangci-lint includes its own set of defaults that disables some comment checks in golint
   # (run golangci-lint run --help to see the list).  We force comment checks back on for consistency

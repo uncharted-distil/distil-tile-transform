@@ -28,13 +28,6 @@ func main() {
 	workers := *flag.Int("workers", 8, "number of workers")
 	flag.Parse()
 
-	// Scan the input dir and collect tile information by parsing each file name
-	tileMap, err := createTileMap(*inputDir)
-	if err != nil {
-		log.Warnf("failed to read tile information")
-		os.Exit(1)
-	}
-
 	// Load the metadata associated with the tile dataset
 	metadata, err := loadMetadata(*inputDir)
 	if err != nil {
@@ -75,6 +68,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// generate row data from tiles
+	rows := processTiles(workers, *inputDir, tileAnalytic)
+
+	// write out results
+	for _, row := range rows {
+		if err = csvWriter.Write(row); err != nil {
+			continue
+		}
+	}
+}
+
+// apply analytic operation to tiles and write results out as a row data
+func processTiles(workers int, inputDir string, tileAnalytic analytics.Transformer) [][]string {
+	// Scan the input dir and collect tile information by parsing each file name
+	tileMap, err := createTileMap(inputDir)
+	if err != nil {
+		log.Warnf("failed to read tile information")
+		os.Exit(1)
+	}
+
 	// flatten tilemap to an array
 	tileArray := []analytics.Tile{}
 	for _, tiles := range tileMap {
@@ -90,7 +103,7 @@ func main() {
 	// reads don't parallelize.  SSD will allow for parallel reads, and you should
 	// get some OS level cacheing in either case if the tile data has been loaded recently.
 	for i := 0; i < workers; i++ {
-		go tileWorker(i, tileBatches, results, tileAnalytic, *inputDir)
+		go tileWorker(i, tileBatches, results, tileAnalytic, inputDir)
 	}
 
 	// pass a batch to each processor
@@ -113,16 +126,20 @@ func main() {
 	}
 	close(results)
 
-	for _, row := range rows {
-		if err = csvWriter.Write(row); err != nil {
-			continue
-		}
-	}
+	return rows
 }
 
 // Processes a tile batch.
-func tileWorker(batchNum int, tileBatches chan []analytics.Tile, results chan [][]string, tileAnalytic analytics.Transformer, inputDir string) {
+func tileWorker(batchNum int, tileBatches chan []analytics.Tile, results chan [][]string,
+	tileAnalytic analytics.Transformer, inputDir string) {
+
 	for tiles := range tileBatches {
+
+		setupErrCount := 0
+		var lastSetupErr error
+		transformErrCount := 0
+		var lastTransformErr error
+
 		rows := make([][]string, len(tiles))
 		log.Infof("batch %d: processing %d tiles", batchNum, len(tiles))
 		for i, tile := range tiles {
@@ -132,10 +149,14 @@ func tileWorker(batchNum int, tileBatches chan []analytics.Tile, results chan []
 			// Load the required tile images and run the tile transform on them.
 			images, err := tileAnalytic.Setup(inputDir, &tile)
 			if err != nil {
+				setupErrCount++
+				lastSetupErr = err
 				continue
 			}
 			values, err := tileAnalytic.Transform(images)
 			if err != nil {
+				transformErrCount++
+				lastTransformErr = err
 				continue
 			}
 
@@ -154,6 +175,17 @@ func tileWorker(batchNum int, tileBatches chan []analytics.Tile, results chan []
 			// return
 			rows[i] = append([]string{tile.GeoHash, date, geoBounds.String()}, formattedValues...)
 		}
+
+		if setupErrCount > 0 {
+			log.Warnf("encountered %d setup errors", setupErrCount)
+			log.Warnf("last setup error: %s", lastSetupErr)
+		}
+
+		if transformErrCount > 0 {
+			log.Warnf("encountered %d transform errors", transformErrCount)
+			log.Warnf("last transform error: %s", lastTransformErr)
+		}
+
 		results <- rows
 	}
 	log.Infof("batch %d: tile processing complete", batchNum)

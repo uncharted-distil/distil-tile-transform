@@ -68,58 +68,22 @@ func loadGeoImage(filePath string) (*GeoImage, error) {
 
 	// Read data in from tiff and save it out as a float64 array.  This is less efficient than storing
 	// each type nativel, but simplifies things downstream.
-	bandData := make([]float64, xSize*ySize)
-	if dataType == gdal.UInt16 {
-		// read the band data into the image buffer
-		buffer := make([]uint16, xSize*ySize)
-		if err = inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
-			gdalDataset.Close()
-			return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
-		}
-		gdalDataset.Close() // done with GDAL buffer
-
-		// copy the data into the final float64 buffer
-		for i, val := range buffer {
-			bandData[i] = float64(val)
-		}
-	} else if dataType == gdal.Byte {
-		// read the band data into the image buffer
-		buffer := make([]uint8, xSize*ySize)
-		if err = inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
-			gdalDataset.Close()
-			return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
-		}
-		gdalDataset.Close() // done with GDAL buffer
-
-		// copy the data into the final float64 buffer
-		for i, val := range buffer {
-			bandData[i] = float64(val)
-		}
-	} else if dataType == gdal.Float32 {
-		// read the band data into the image buffer
-		buffer := make([]float32, xSize*ySize)
-		if err = inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
-			gdalDataset.Close()
-			return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
-		}
-		gdalDataset.Close() // done with GDAL buffer
-
-		// copy the data into the final float64 buffer
-		for i, val := range buffer {
-			bandData[i] = float64(val)
-		}
-	} else if dataType == gdal.Float64 {
-		// read the band data into the image buffer
-		buffer := bandData
-		if err = inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
-			gdalDataset.Close()
-			return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
-		}
-		gdalDataset.Close() // done with GDAL buffer
-
-		// No copy needed - already stored as float64
-	} else {
+	var bandData []float64
+	switch dataType {
+	case gdal.UInt16:
+		bandData, err = readUint16(xSize, ySize, &gdalDataset, &inputBand)
+	case gdal.Byte:
+		bandData, err = readByte(xSize, ySize, &gdalDataset, &inputBand)
+	case gdal.Float32:
+		bandData, err = readFloat32(xSize, ySize, &gdalDataset, &inputBand)
+	case gdal.Float64:
+		bandData, err = readFloat64(xSize, ySize, &gdalDataset, &inputBand)
+	default:
 		return nil, errors.Wrapf(err, "unhandled GDAL band type %v for %s", dataType, filePath)
+	}
+
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to load band data for %s", filePath)
 	}
 
 	return &GeoImage{
@@ -127,4 +91,71 @@ func loadGeoImage(filePath string) (*GeoImage, error) {
 		XSize:  xSize,
 		YSize:  ySize,
 		Bounds: bounds}, nil
+}
+
+// If only there was some way you could make a function that took a type as an argument...
+
+func readByte(xSize int, ySize int, dataset *gdal.Dataset, inputBand *gdal.RasterBand) ([]float64, error) {
+	// read the band data into the image buffer
+	buffer := make([]byte, xSize*ySize)
+	if err := inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
+		dataset.Close()
+		return nil, err
+	}
+	dataset.Close() // done with GDAL buffer
+
+	// copy the data into the final float64 buffer
+	bandData := make([]float64, xSize*ySize)
+	for i, val := range buffer {
+		bandData[i] = float64(val)
+	}
+
+	return bandData, nil
+}
+
+func readUint16(xSize int, ySize int, dataset *gdal.Dataset, inputBand *gdal.RasterBand) ([]float64, error) {
+	// read the band data into the image buffer
+	buffer := make([]uint16, xSize*ySize)
+	if err := inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
+		dataset.Close()
+		return nil, err
+	}
+	dataset.Close() // done with GDAL buffer
+
+	// copy the data into the final float64 buffer
+	bandData := make([]float64, xSize*ySize)
+	for i, val := range buffer {
+		bandData[i] = float64(val)
+	}
+
+	return bandData, nil
+}
+
+func readFloat32(xSize int, ySize int, dataset *gdal.Dataset, inputBand *gdal.RasterBand) ([]float64, error) {
+	// read the band data into the image buffer
+	buffer := make([]float32, xSize*ySize)
+	if err := inputBand.IO(gdal.Read, 0, 0, xSize, ySize, buffer, xSize, ySize, 0, 0); err != nil {
+		dataset.Close()
+		return nil, err
+	}
+	dataset.Close() // done with GDAL buffer
+
+	// copy the data into the final float64 buffer
+	bandData := make([]float64, xSize*ySize)
+	for i, val := range buffer {
+		bandData[i] = float64(val)
+	}
+
+	return bandData, nil
+}
+
+func readFloat64(xSize int, ySize int, dataset *gdal.Dataset, inputBand *gdal.RasterBand) ([]float64, error) {
+	// read the image into the band data buffer
+	bandData := make([]float64, xSize*ySize)
+	if err := inputBand.IO(gdal.Read, 0, 0, xSize, ySize, bandData, xSize, ySize, 0, 0); err != nil {
+		dataset.Close()
+		return nil, err
+	}
+	dataset.Close() // done with GDAL buffer
+	return bandData, nil
 }
