@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -94,101 +95,102 @@ func processTiles(workers int, inputDir string, tileAnalytic analytics.Transform
 		tileArray = append(tileArray, tiles...)
 	}
 
-	batchSize := len(tileArray) / workers
+	results := make(chan []string, len(tileArray))
+	tiles := make(chan analytics.Tile, len(tileArray))
 
-	results := make(chan [][]string)
-	tileBatches := make(chan []analytics.Tile, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
 
 	// Start workers.  Mileage will vary given that IO is the bottleneck, and HDD
 	// reads don't parallelize.  SSD will allow for parallel reads, and you should
 	// get some OS level cacheing in either case if the tile data has been loaded recently.
 	for i := 0; i < workers; i++ {
-		go tileWorker(i, tileBatches, results, tileAnalytic, inputDir)
+		go tileWorker(i, tiles, results, &wg, tileAnalytic, inputDir)
 	}
 
-	// pass a batch to each processor
-	for i := 0; i < workers; i++ {
-		start := i * batchSize
-		end := (i + 1) * batchSize
-		if i == (workers - 1) {
-			end += len(tileArray) % batchSize
-		}
-		log.Infof("processing batch %d:%d\n", start, end)
-		tileBatches <- tileArray[start:end]
+	// Send all of the tiles to the workers
+	for _, tile := range tileArray {
+		tiles <- tile
 	}
-	close(tileBatches)
+	close(tiles)
 
-	// collect the results from the processors
+	// Wait for workers to finish
+	go func() {
+		defer close(results)
+		wg.Wait()
+	}()
+
+	// Collect the results
 	rows := [][]string{}
-	for i := 0; i < workers; i++ {
-		r := <-results
-		rows = append(rows, r...)
+	for r := range results {
+		rows = append(rows, r)
 	}
-	close(results)
 
 	return rows
 }
 
 // Processes a tile batch.
-func tileWorker(batchNum int, tileBatches chan []analytics.Tile, results chan [][]string,
-	tileAnalytic analytics.Transformer, inputDir string) {
+func tileWorker(worker int, tiles chan analytics.Tile, results chan []string,
+	wg *sync.WaitGroup, tileAnalytic analytics.Transformer, inputDir string) {
 
-	for tiles := range tileBatches {
+	setupErrCount := 0
+	var lastSetupErr error
 
-		setupErrCount := 0
-		var lastSetupErr error
-		transformErrCount := 0
-		var lastTransformErr error
+	transformErrCount := 0
+	var lastTransformErr error
 
-		rows := make([][]string, len(tiles))
-		log.Infof("batch %d: processing %d tiles", batchNum, len(tiles))
-		for i, tile := range tiles {
-			if i%100 == 0 {
-				log.Infof("batch %d: processed %d/%d tiles", batchNum, i, len(tiles))
-			}
-			// Load the required tile images and run the tile transform on them.
-			images, err := tileAnalytic.Setup(inputDir, &tile)
-			if err != nil {
-				setupErrCount++
-				lastSetupErr = err
-				continue
-			}
-			values, err := tileAnalytic.Transform(images)
-			if err != nil {
-				transformErrCount++
-				lastTransformErr = err
-				continue
-			}
-
-			// Reformat the results
-			formattedValues := make([]string, len(values))
-			for i, value := range values {
-				formattedValues[i] = strconv.FormatFloat(value, 'f', -1, 64)
-			}
-
-			// Reformat the tile timestamp to YYYY-MM-DD.
-			date := time.Unix(tile.Timestamp, 0).Format("2006-01-02")
-
-			// Extract the geobounds from the first image
-			geoBounds := images[0].Bounds
-
-			// return
-			rows[i] = append([]string{tile.GeoHash, date, geoBounds.String()}, formattedValues...)
+	for tile := range tiles {
+		count := 0
+		count++
+		if count%100 == 0 {
+			log.Infof("worker %d: processed %d", worker, count)
 		}
 
-		if setupErrCount > 0 {
-			log.Warnf("encountered %d setup errors", setupErrCount)
-			log.Warnf("last setup error: %s", lastSetupErr)
+		// Load the required tile images and run the tile transform on them.
+		images, err := tileAnalytic.Setup(inputDir, &tile)
+		if err != nil {
+			setupErrCount++
+			lastSetupErr = err
+			continue
+		}
+		values, err := tileAnalytic.Transform(images)
+		if err != nil {
+			transformErrCount++
+			lastTransformErr = err
+			continue
 		}
 
-		if transformErrCount > 0 {
-			log.Warnf("encountered %d transform errors", transformErrCount)
-			log.Warnf("last transform error: %s", lastTransformErr)
+		// Reformat the results
+		formattedValues := make([]string, len(values))
+		for i, value := range values {
+			formattedValues[i] = strconv.FormatFloat(value, 'f', -1, 64)
 		}
 
-		results <- rows
+		// Reformat the tile timestamp to YYYY-MM-DD.
+		date := time.Unix(tile.Timestamp, 0).Format("2006-01-02")
+
+		// Extract the geobounds from the first image
+		geoBounds := images[0].Bounds
+
+		row := []string{tile.GeoHash, date, geoBounds.String()}
+		row = append(row, formattedValues...)
+
+		results <- row
 	}
-	log.Infof("batch %d: tile processing complete", batchNum)
+
+	log.Infof("worker %d: tile processing complete", worker)
+
+	if setupErrCount > 0 {
+		log.Warnf("encountered %d setup errors", setupErrCount)
+		log.Warnf("last setup error: %s", lastSetupErr)
+	}
+
+	if transformErrCount > 0 {
+		log.Warnf("encountered %d transform errors", transformErrCount)
+		log.Warnf("last transform error: %s", lastTransformErr)
+	}
+
+	wg.Done()
 }
 
 // Creates entries for tile data by parsing file names.  Entries are mapped
