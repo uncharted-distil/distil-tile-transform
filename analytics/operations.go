@@ -18,8 +18,12 @@ type Operation string
 type JSONString string
 
 const (
-	// OperationCategoryCounts counts the instances of each category value in a tile.
-	OperationCategoryCounts = "category_counts"
+	// OperationCategoryCountsRaw counts the instances of each category value in a tile.
+	OperationCategoryCountsRaw = "category_counts_raw"
+
+	// OperationCategoryCounts counts the instances of each category value in a tile and returns them
+	// as a percentage of the total tile pixels.
+	OperationCategoryCountsPercentage = "category_counts_percentage"
 
 	// OperationMeanNDVI computes the mean NDVI for a tile.
 	OperationMeanNDVI = "mean_ndvi"
@@ -60,8 +64,13 @@ type Transformer interface {
 func CreateTileAnalytic(metadata JSONString, operation Operation) (Transformer, error) {
 	var tileAnalytic Transformer
 	var err error
-	if operation == OperationCategoryCounts {
-		tileAnalytic, err = NewCategoryCounts(metadata)
+	if operation == OperationCategoryCountsRaw {
+		tileAnalytic, err = NewCategoryCountsRaw(metadata)
+		if err != nil {
+			return nil, err
+		}
+	} else if operation == OperationCategoryCountsPercentage {
+		tileAnalytic, err = NewCategoryCountsPercentage(metadata)
 		if err != nil {
 			return nil, err
 		}
@@ -222,25 +231,6 @@ func NewCategoryCounts(metadata JSONString) (CategoryCounts, error) {
 	return c, nil
 }
 
-// Transform implements the CategoryCounts tile transformation, which counts the number
-// of pixels of each category.
-func (c CategoryCounts) Transform(tileData []*GeoImage) ([]float64, error) {
-	if len(c.Categories) == 0 {
-		return nil, errors.New("labels unspecified")
-	}
-
-	categoryCounts := make([]float64, len(c.Categories))
-	for _, val := range tileData[0].Data {
-		// extract the 16 bit pixel values for each input band
-		value := int(val)
-		index := c.IndexMap[value]
-
-		// update the count for the associated category
-		categoryCounts[index]++
-	}
-	return categoryCounts, nil
-}
-
 // Setup implements the CategoryCounts setup, loading tile data from disk.
 func (c CategoryCounts) Setup(inputDir string, tile *Tile) ([]*GeoImage, error) {
 	// CDB: the band is hard coded to  land cover - it needs to be part of a configuration
@@ -295,4 +285,77 @@ func getCategoryNames(categoryNamesProperty string, metadata JSONString) ([]stri
 		categoryNames[i] = result.String()
 	}
 	return categoryNames, nil
+}
+
+// CategoryCountsRaw computes the number of pixels in a tile the are assigned
+// to a given category.
+type CategoryCountsRaw struct {
+	CategoryCounts
+}
+
+// NewCategoryCountsRaw create a new CategoryCounts tile operation
+func NewCategoryCountsRaw(metadata JSONString) (CategoryCountsRaw, error) {
+	c, err := NewCategoryCounts(metadata)
+	if err != nil {
+		return CategoryCountsRaw{}, err
+	}
+	return CategoryCountsRaw{c}, nil
+}
+
+// Transform implements the CategoryCounts tile transformation, which counts the number
+// of pixels of each category.
+func (c CategoryCountsRaw) Transform(tileData []*GeoImage) ([]float64, error) {
+	return computeCounts(&c.CategoryCounts, tileData)
+}
+
+// CategoryCountsPercentage computes the percentage of pixels in a given tile the are assigned
+// to a given category.
+type CategoryCountsPercentage struct {
+	CategoryCounts
+}
+
+// NewCategoryCountsPercentage create a new CategoryCounts tile operation
+func NewCategoryCountsPercentage(metadata JSONString) (CategoryCountsPercentage, error) {
+	c, err := NewCategoryCounts(metadata)
+	if err != nil {
+		return CategoryCountsPercentage{}, err
+	}
+	return CategoryCountsPercentage{c}, nil
+}
+
+// Transform implements the CategoryCounts tile transformation, which counts the number
+// of pixels of each category.
+func (c CategoryCountsPercentage) Transform(tileData []*GeoImage) ([]float64, error) {
+	// compute the raw counts
+	counts, err := computeCounts(&c.CategoryCounts, tileData)
+	if err != nil {
+		return counts, err
+	}
+
+	// compute percentage in place
+	totalPixels := float64(tileData[0].XSize * tileData[0].YSize)
+	for i, count := range counts {
+		counts[i] = count / totalPixels
+	}
+
+	// compute each as a percentage of the total
+	return counts, nil
+}
+
+func computeCounts(c *CategoryCounts, tileData []*GeoImage) ([]float64, error) {
+	if len(c.Categories) == 0 {
+		return nil, errors.New("labels unspecified")
+	}
+
+	categoryCounts := make([]float64, len(c.Categories))
+	for _, val := range tileData[0].Data {
+		// extract the 16 bit pixel values for each input band
+		value := int(val)
+		index := c.IndexMap[value]
+
+		// update the count for the associated category
+		categoryCounts[index]++
+	}
+
+	return categoryCounts, nil
 }
