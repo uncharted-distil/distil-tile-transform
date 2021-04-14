@@ -19,9 +19,9 @@ type GeoBounds struct {
 func (g GeoBounds) String() string {
 	return fmt.Sprintf("%f,%f,%f,%f,%f,%f,%f,%f",
 		g.MinLon, g.MinLat,
-		g.MaxLon, g.MinLat,
-		g.MaxLon, g.MaxLat,
 		g.MinLon, g.MaxLat,
+		g.MaxLon, g.MaxLat,
+		g.MaxLon, g.MinLat,
 	)
 }
 
