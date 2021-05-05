@@ -21,9 +21,13 @@ const (
 	// OperationCategoryCountsRaw counts the instances of each category value in a tile.
 	OperationCategoryCountsRaw = "category_counts_raw"
 
-	// OperationCategoryCounts counts the instances of each category value in a tile and returns them
+	// OperationCategoryCountsPercentage counts the instances of each category value in a tile and returns them
 	// as a percentage of the total tile pixels.
 	OperationCategoryCountsPercentage = "category_counts_percentage"
+
+	// OperationCategoryBinary counts the instances of each category value in a tile and return a 1 if the
+	// the count is non-zero.
+	OperationCategoryBinary = "category_binary"
 
 	// OperationMeanNDVI computes the mean NDVI for a tile.
 	OperationMeanNDVI = "mean_ndvi"
@@ -71,6 +75,11 @@ func CreateTileAnalytic(metadata JSONString, operation Operation) (Transformer, 
 		}
 	} else if operation == OperationCategoryCountsPercentage {
 		tileAnalytic, err = NewCategoryCountsPercentage(metadata)
+		if err != nil {
+			return nil, err
+		}
+	} else if operation == OperationCategoryBinary {
+		tileAnalytic, err = NewCategoryBinary(metadata)
 		if err != nil {
 			return nil, err
 		}
@@ -323,8 +332,8 @@ func NewCategoryCountsPercentage(metadata JSONString) (CategoryCountsPercentage,
 	return CategoryCountsPercentage{c}, nil
 }
 
-// Transform implements the CategoryCounts tile transformation, which counts the number
-// of pixels of each category.
+// Transform implements the CategoryCountsPercentage tile transformation, which counts the number
+// of pixels of each category and returns them as a percentage of the total tile.
 func (c CategoryCountsPercentage) Transform(tileData []*GeoImage) ([]float64, error) {
 	// compute the raw counts
 	counts, err := computeCounts(&c.CategoryCounts, tileData)
@@ -339,6 +348,41 @@ func (c CategoryCountsPercentage) Transform(tileData []*GeoImage) ([]float64, er
 	}
 
 	// compute each as a percentage of the total
+	return counts, nil
+}
+
+// CategoryBinary sets a value of 1 if a particular category is present for a tile, 0
+// otherwise.
+type CategoryBinary struct {
+	CategoryCounts
+}
+
+// NewCategoryBinary create a new CategoryBinary tile operation
+func NewCategoryBinary(metadata JSONString) (CategoryBinary, error) {
+	c, err := NewCategoryCounts(metadata)
+	if err != nil {
+		return CategoryBinary{}, err
+	}
+	return CategoryBinary{c}, nil
+}
+
+// Transform implements the CategoryBinary tile transformation, which counts the number
+// of pixels of each category, and returns 1 if that number is non-zero.
+func (c CategoryBinary) Transform(tileData []*GeoImage) ([]float64, error) {
+	// compute the raw counts
+	counts, err := computeCounts(&c.CategoryCounts, tileData)
+	if err != nil {
+		return counts, err
+	}
+
+	// convert to a binary indicator
+	for i, count := range counts {
+		if count > 0 {
+			counts[i] = 1.0
+		} else {
+			counts[i] = 0.0
+		}
+	}
 	return counts, nil
 }
 
